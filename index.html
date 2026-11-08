@@ -77,6 +77,7 @@
     function sendMetadata() {
       if (!player || !currentId || !currentUrl) return;
       var data = player.getVideoData ? player.getVideoData() : {};
+      if (data.video_id && data.video_id !== currentId) return;
       title = data.title || title;
       renderHeading();
       var meta = {
@@ -103,7 +104,6 @@
           autoplay: 1,
           controls: 1,
           disablekb: 0,
-          fs: 0,
           playsinline: 1,
           origin: location.origin
         },
