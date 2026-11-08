@@ -5,51 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="referrer" content="origin" />
 <title>Car Radio YouTube Player</title>
-<style>
-  * { box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; font-family: Arial, sans-serif; }
-  #tile {
-    position: fixed;
-    top: 8px;
-    right: 8px;
-    width: 248px;
-    padding: 4px;
-    border: 1px solid rgba(255,255,255,.32);
-    border-radius: 8px;
-    background: rgba(15,18,23,.94);
-    color: #fff;
-    box-shadow: 0 4px 16px rgba(0,0,0,.55);
-  }
-  #heading {
-    height: 24px;
-    overflow: hidden;
-    padding: 3px 4px;
-    color: #f2f2f2;
-    font-size: 12px;
-    font-weight: 700;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  #yt { width: 240px; height: 240px; }
-</style>
-</head>
-<body>
-  <div id="tile">
-    <div id="heading">YouTube player</div>
-    <div id="yt"></div>
-  </div>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; font-family: Arial, sans-serif; }
+    #tile { position: fixed; top: 8px; right: 8px; width: 240px; height: 240px; }
+    #yt { width: 240px; height: 240px; }
+  </style>
+  </head>
+  <body>
+    <div id="tile">
+      <div id="yt"></div>
+    </div>
   <script>
     var player = null;
     var ready = false;
     var currentId = null;
     var currentUrl = null;
+    var currentTrackKey = null;
     var vehicleId = -1;
     var pending = null;
     var wantVolume = 50;
-    var title = '';
-    var status = '';
-    var tileSlot = 0;
-    var tileCount = 1;
+    var wantSeekMs = 0;
     var finishReported = false;
 
     function report(message) {
@@ -71,17 +47,10 @@
       } catch (e) { return ''; }
     }
 
-    function renderHeading() {
-      var carLabel = tileCount > 1 ? 'car ' + (tileSlot + 1) + ' / ' + tileCount : 'car radio';
-      document.getElementById('heading').textContent = 'YouTube · ' + carLabel + (title ? ' · ' + title : '') + (status ? ' — ' + status : '');
-    }
-
     function sendMetadata() {
       if (!player || !currentId || !currentUrl) return;
       var data = player.getVideoData ? player.getVideoData() : {};
       if (data.video_id && data.video_id !== currentId) return;
-      title = data.title || title;
-      renderHeading();
       var meta = {
         id: vehicleId,
         url: currentUrl,
@@ -92,10 +61,23 @@
       try { if (typeof mp !== 'undefined') mp.trigger('carradio:audio:meta', JSON.stringify(meta)); } catch (e) {}
     }
 
-    function reportFinish(expectedId) {
-      if (finishReported || currentId !== expectedId) return;
+    function reportFinish(expectedId, expectedTrackKey) {
+      if (finishReported || currentId !== expectedId || currentTrackKey !== expectedTrackKey) return;
       finishReported = true;
       try { if (typeof mp !== 'undefined') mp.trigger('carradio:audio:finished', vehicleId); } catch (e) {}
+    }
+
+    function syncPosition(positionMs, trackKey) {
+      wantSeekMs = Math.max(0, Number(positionMs) || 0);
+      if (!ready || !player || trackKey !== currentTrackKey) return;
+      try {
+        if (player.getPlayerState() !== YT.PlayerState.PLAYING) return;
+        var actualMs = player.getCurrentTime() * 1000;
+        if (Math.abs(actualMs - wantSeekMs) > 1500) {
+          player.seekTo(wantSeekMs / 1000, true);
+          report('sync seek to ' + Math.round(wantSeekMs) + 'ms');
+        }
+      } catch (e) { report('sync position failed: ' + (e && e.message || e)); }
     }
 
     (function () {
@@ -134,26 +116,23 @@
           },
           onStateChange: function (event) {
             if (event.data === YT.PlayerState.PLAYING) {
-              status = '';
               window.setVolume(wantVolume);
               sendMetadata();
               setTimeout(sendMetadata, 500);
+              syncPosition(wantSeekMs, currentTrackKey);
             } else if (event.data === YT.PlayerState.ENDED) {
               var data = player.getVideoData ? player.getVideoData() : {};
-              if (!data.video_id || data.video_id === currentId) reportFinish(currentId);
+              if (!data.video_id || data.video_id === currentId) reportFinish(currentId, currentTrackKey);
             }
           },
           onError: function (event) {
             var failedId = currentId;
-            status = 'video unavailable (YouTube error ' + event.data + ')';
-            renderHeading();
-            report(status);
-            setTimeout(function () { reportFinish(failedId); }, 1500);
+            var failedTrackKey = currentTrackKey;
+            report('video unavailable (YouTube error ' + event.data + ')');
+            setTimeout(function () { reportFinish(failedId, failedTrackKey); }, 1500);
           },
           onAutoplayBlocked: function () {
-            status = 'click the YouTube player to start';
-            renderHeading();
-            report(status);
+            report('autoplay blocked; click the YouTube player to start');
           }
         }
       });
@@ -161,25 +140,35 @@
 
     function loadPending(request) {
       if (!ready || !player) { pending = request; return; }
+      if (currentTrackKey === request.trackKey && currentUrl === request.url) return;
       currentId = request.videoId;
       currentUrl = request.url;
+      currentTrackKey = request.trackKey;
       vehicleId = request.vehicleId;
-      title = '';
-      status = '';
+      wantSeekMs = Math.max(0, Number(request.seekMs) || 0);
       finishReported = false;
-      renderHeading();
       player.loadVideoById({
         videoId: currentId,
-        startSeconds: Math.max(0, Number(request.seekMs) / 1000)
+        startSeconds: wantSeekMs / 1000
       });
       player.playVideo();
     }
 
-    window.loadTrack = function (url, seekMs, id) {
+    window.loadTrack = function (url, seekMs, id, trackKey) {
       var videoId = videoIdFromUrl(url);
       if (!videoId) { report('Unsupported YouTube URL'); return; }
-      if (currentUrl === url && currentId === videoId) return;
-      loadPending({ url: String(url), videoId: videoId, seekMs: seekMs, vehicleId: Number(id) });
+      var key = String(trackKey || url);
+      if (currentUrl === url && currentId === videoId && currentTrackKey === key) return;
+      loadPending({ url: String(url), videoId: videoId, seekMs: seekMs, vehicleId: Number(id), trackKey: key });
+    };
+
+    window.syncTrack = function (positionMs, trackKey) {
+      var key = String(trackKey);
+      if (pending && pending.trackKey === key && currentTrackKey !== key) {
+        pending.seekMs = positionMs;
+        return;
+      }
+      syncPosition(positionMs, key);
     };
 
     window.setVolume = function (volume) {
@@ -192,7 +181,7 @@
     window.setScene = function () {};
 
     window.setTile = function (slot, total) {
-      var tileWidth = 256, tileHeight = 280, margin = 8;
+      var tileWidth = 248, tileHeight = 248, margin = 8;
       var columns = Math.max(1, Math.floor((window.innerWidth - margin * 2) / tileWidth));
       var index = Math.max(0, Number(slot) || 0);
       var column = index % columns;
@@ -201,9 +190,6 @@
       tile.style.left = Math.max(margin, window.innerWidth - margin - tileWidth * (column + 1)) + 'px';
       tile.style.right = 'auto';
       tile.style.top = (margin + row * tileHeight) + 'px';
-      tileSlot = index;
-      tileCount = Math.max(1, Number(total) || 1);
-      renderHeading();
     };
   </script>
 </body>
