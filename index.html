@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="referrer" content="origin" />
+<title>Car Radio YouTube Player</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; font-family: Arial, sans-serif; }
+  #tile {
+    position: fixed;
+    top: 8px;
+    right: 8px;
+    width: 248px;
+    padding: 4px;
+    border: 1px solid rgba(255,255,255,.32);
+    border-radius: 8px;
+    background: rgba(15,18,23,.94);
+    color: #fff;
+    box-shadow: 0 4px 16px rgba(0,0,0,.55);
+  }
+  #heading {
+    height: 24px;
+    overflow: hidden;
+    padding: 3px 4px;
+    color: #f2f2f2;
+    font-size: 12px;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #yt { width: 240px; height: 240px; }
+</style>
+</head>
+<body>
+  <div id="tile">
+    <div id="heading">YouTube player</div>
+    <div id="yt"></div>
+  </div>
+  <script>
+    var player = null;
+    var ready = false;
+    var currentId = null;
+    var currentUrl = null;
+    var vehicleId = -1;
+    var pending = null;
+    var wantVolume = 50;
+    var title = '';
+    var tileSlot = 0;
+    var tileCount = 1;
+
+    function report(message) {
+      try { if (typeof mp !== 'undefined') mp.trigger('carradio:audio:log', String(message)); } catch (e) {}
+    }
+
+    function videoIdFromUrl(raw) {
+      try {
+        var url = new URL(String(raw));
+        var host = url.hostname.toLowerCase();
+        var parts = url.pathname.split('/').filter(Boolean);
+        var id = '';
+        if (host === 'youtu.be' || host === 'www.youtu.be') id = parts[0] || '';
+        else if (['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com'].indexOf(host) >= 0) {
+          if (url.pathname === '/watch') id = url.searchParams.get('v') || '';
+          else if (['embed', 'shorts', 'live', 'v'].indexOf(parts[0]) >= 0) id = parts[1] || '';
+        }
+        return /^[A-Za-z0-9_-]{11}$/.test(id) ? id : '';
+      } catch (e) { return ''; }
+    }
+
+    function renderHeading() {
+      var carLabel = tileCount > 1 ? 'car ' + (tileSlot + 1) + ' / ' + tileCount : 'car radio';
+      document.getElementById('heading').textContent = 'YouTube · ' + carLabel + (title ? ' · ' + title : '');
+    }
+
+    function sendMetadata() {
+      if (!player || !currentId || !currentUrl) return;
+      var data = player.getVideoData ? player.getVideoData() : {};
+      title = data.title || title;
+      renderHeading();
+      var meta = {
+        id: vehicleId,
+        url: currentUrl,
+        title: data.title || '',
+        artist: data.author || 'YouTube',
+        artwork: 'https://i.ytimg.com/vi/' + currentId + '/hqdefault.jpg'
+      };
+      try { if (typeof mp !== 'undefined') mp.trigger('carradio:audio:meta', JSON.stringify(meta)); } catch (e) {}
+    }
+
+    (function () {
+      var tag = document.createElement('script');
+      tag.src = 'https://www.youtube.com/iframe_api';
+      document.head.appendChild(tag);
+    })();
+
+    window.onYouTubeIframeAPIReady = function () {
+      player = new YT.Player('yt', {
+        width: '240',
+        height: '240',
+        playerVars: {
+          autoplay: 1,
+          controls: 1,
+          disablekb: 0,
+          fs: 0,
+          playsinline: 1,
+          origin: location.origin
+        },
+        events: {
+          onReady: function () {
+            ready = true;
+            try {
+              var frame = player.getIframe();
+              if (frame) {
+                frame.setAttribute('referrerpolicy', 'origin');
+                frame.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture');
+              }
+            } catch (e) {}
+            if (pending) {
+              var request = pending;
+              pending = null;
+              currentId = null;
+              loadPending(request);
+            }
+          },
+          onStateChange: function (event) {
+            if (event.data === YT.PlayerState.PLAYING) {
+              window.setVolume(wantVolume);
+              sendMetadata();
+              setTimeout(sendMetadata, 500);
+            } else if (event.data === YT.PlayerState.ENDED) {
+              try { if (typeof mp !== 'undefined') mp.trigger('carradio:audio:finished', vehicleId); } catch (e) {}
+            }
+          },
+          onError: function (event) { report('YouTube error ' + event.data); }
+        }
+      });
+    };
+
+    function loadPending(request) {
+      if (!ready || !player) { pending = request; return; }
+      currentId = request.videoId;
+      currentUrl = request.url;
+      vehicleId = request.vehicleId;
+      title = '';
+      renderHeading();
+      player.loadVideoById({
+        videoId: currentId,
+        startSeconds: Math.max(0, Number(request.seekMs) / 1000)
+      });
+      player.playVideo();
+    }
+
+    window.loadTrack = function (url, seekMs, id) {
+      var videoId = videoIdFromUrl(url);
+      if (!videoId) { report('Unsupported YouTube URL'); return; }
+      if (currentUrl === url && currentId === videoId) return;
+      loadPending({ url: String(url), videoId: videoId, seekMs: seekMs, vehicleId: Number(id) });
+    };
+
+    window.setVolume = function (volume) {
+      wantVolume = Math.max(0, Math.min(100, Number(volume) || 0));
+      if (!ready || !player) return;
+      if (wantVolume <= 0) player.mute();
+      else { player.unMute(); player.setVolume(wantVolume); }
+    };
+
+    window.setScene = function () {};
+
+    window.setTile = function (slot, total) {
+      var tileWidth = 256, tileHeight = 280, margin = 8;
+      var columns = Math.max(1, Math.floor((window.innerWidth - margin * 2) / tileWidth));
+      var index = Math.max(0, Number(slot) || 0);
+      var column = index % columns;
+      var row = Math.floor(index / columns);
+      var tile = document.getElementById('tile');
+      tile.style.left = Math.max(margin, window.innerWidth - margin - tileWidth * (column + 1)) + 'px';
+      tile.style.right = 'auto';
+      tile.style.top = (margin + row * tileHeight) + 'px';
+      tileSlot = index;
+      tileCount = Math.max(1, Number(total) || 1);
+      renderHeading();
+    };
+  </script>
+</body>
+</html>
