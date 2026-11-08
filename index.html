@@ -50,6 +50,7 @@
     var status = '';
     var tileSlot = 0;
     var tileCount = 1;
+    var finishReported = false;
 
     function report(message) {
       try { if (typeof mp !== 'undefined') mp.trigger('carradio:audio:log', String(message)); } catch (e) {}
@@ -89,6 +90,12 @@
         artwork: 'https://i.ytimg.com/vi/' + currentId + '/hqdefault.jpg'
       };
       try { if (typeof mp !== 'undefined') mp.trigger('carradio:audio:meta', JSON.stringify(meta)); } catch (e) {}
+    }
+
+    function reportFinish(expectedId) {
+      if (finishReported || currentId !== expectedId) return;
+      finishReported = true;
+      try { if (typeof mp !== 'undefined') mp.trigger('carradio:audio:finished', vehicleId); } catch (e) {}
     }
 
     (function () {
@@ -132,13 +139,16 @@
               sendMetadata();
               setTimeout(sendMetadata, 500);
             } else if (event.data === YT.PlayerState.ENDED) {
-              try { if (typeof mp !== 'undefined') mp.trigger('carradio:audio:finished', vehicleId); } catch (e) {}
+              var data = player.getVideoData ? player.getVideoData() : {};
+              if (!data.video_id || data.video_id === currentId) reportFinish(currentId);
             }
           },
           onError: function (event) {
+            var failedId = currentId;
             status = 'video unavailable (YouTube error ' + event.data + ')';
             renderHeading();
             report(status);
+            setTimeout(function () { reportFinish(failedId); }, 1500);
           },
           onAutoplayBlocked: function () {
             status = 'click the YouTube player to start';
@@ -156,6 +166,7 @@
       vehicleId = request.vehicleId;
       title = '';
       status = '';
+      finishReported = false;
       renderHeading();
       player.loadVideoById({
         videoId: currentId,
